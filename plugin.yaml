@@ -1,0 +1,28 @@
+schema: mcpg.dev/plugin/v1
+id: dev.mcpg.backend.twilio
+name: Twilio SMS + Voice Binding
+license: Apache-2.0
+description: |
+  Twilio SMS + Voice through MCP. One cdylib with three entities. The `backend`
+  binding exposes operation-discriminated tools that proxy the Twilio REST API
+  (send/list/get/redact/delete SMS with MMS media, make/list/get/modify calls,
+  recordings, phone-number validation via Lookups v2, OTP start/check via
+  Verify v2, local TwiML authoring, and call-response staging). The `http_route`
+  entity
+  receives Twilio's inbound SMS / voice / gather / status webhooks under
+  `/plugins/dev.mcpg.backend.twilio/hooks/*`, validates the `X-Twilio-Signature`
+  header (HMAC-SHA1 over the reconstructed public URL + sorted POST params,
+  constant-time compare) before any side effect, and returns TwiML. The
+  `watch_strategy` entity (kind `twilio_inbound`) pushes
+  `notifications/resources/updated` to subscribed MCP clients natively when the
+  webhook receives an inbound event — no `notify_webhook_url` HTTP round-trip;
+  an optional `kinds` watch-spec filter (`sms` / `voice` / `status`, default
+  all) selects which inbound kinds fire each watcher. REST auth is HTTP Basic
+  with an API Key (recommended) or the Account Auth Token; the webhook signature
+  is ALWAYS keyed by the Account Auth Token. Secrets resolve from `${cred://…}`
+  at config load; bare `cred://` in request args is rejected. TLS is pure-Rust
+  rustls (no native-tls / OpenSSL).
+class: backend
+runtime: native-cdylib-v1
+protocol_version: "1.0"
+required_capabilities: [network_outbound]

@@ -1,0 +1,64 @@
+[package]
+name = "mcpg-plugin-backend-twilio"
+version = "0.1.0-alpha.15"
+license = "Apache-2.0"
+edition = "2024"
+description = """
+Twilio SMS + Voice backend binding plugin for mcpg. One cdylib carrying TWO
+entities: a `backend` binding whose operations proxy the Twilio REST API
+(send/list/get SMS, make/list/get/modify calls, recordings, TwiML authoring,
+call-response staging), and an `http_route` entity that receives Twilio's
+inbound SMS/voice/status/gather webhooks, validates the `X-Twilio-Signature`
+(HMAC-SHA1, constant-time), and returns TwiML. REST auth is HTTP Basic with an
+API Key (or the Account Auth Token); the webhook signature is always keyed by
+the Account Auth Token. Secrets arrive resolved from `${cred://…}` at config
+load (bare `cred://` in request args is rejected). Pure-Rust transport
+(reqwest + rustls) — no native-tls / OpenSSL. Complements the http / command /
+sql backends.
+"""
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+cdylib-export = []
+# Declared empty so the SDK macro's static accessor doesn't trip
+# unexpected_cfgs; twilio is consumed as a cdylib.
+static-firstparty = []
+# Gates the wiremock-backed REST + webhook suite so a plain `cargo test --lib`
+# stays offline. Run:
+# `cargo test -p mcpg-plugin-backend-twilio --features integration-tests \
+#   --test integration -- --test-threads 1`.
+integration-tests = []
+
+[dependencies]
+mcpg-plugin-protocol = { git = "https://github.com/mcpg-dev/mcpg-plugin-protocol", tag = "v0.1.0-beta.13", version = "=0.1.0-beta.13" }
+mcpg-plugin-sdk      = { git = "https://github.com/mcpg-dev/mcpg-plugin-sdk", tag = "v0.1.0-beta.13", version = "=0.1.0-beta.13", features = ["static-firstparty"] }
+mcpg-plugin-host     = { git = "https://github.com/mcpg-dev/mcpg-plugin-host", tag = "v0.1.0-beta.13", version = "=0.1.0-beta.13" }
+async-trait    = "0.1"
+base64         = "0.22"
+bytes          = "1"
+# HMAC-SHA1 webhook signature (Twilio's scheme) + SHA-256 for the JSON-body
+# `bodySHA256` variant. Constant-time compare via `subtle`.
+hmac           = "0.12"
+sha1           = "0.10"
+sha2           = "0.10"
+subtle         = "2.6"
+metrics        = "0.24"
+# Pure-Rust HTTPS to the Twilio REST API. rustls-tls selects the rustls
+# provider (no native-tls / OpenSSL); `json` for response decoding.
+reqwest        = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# TwiML rendering with correct XML escaping of all text/attr values.
+quick-xml      = "0.37"
+serde          = { version = "1", features = ["derive"] }
+serde_json     = "1"
+serde_urlencoded = "0.7"
+tokio          = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
+tracing        = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+async-trait = "0.1"
+# Mocks the Twilio REST API + simulates inbound webhook POSTs.
+wiremock = "0.6"

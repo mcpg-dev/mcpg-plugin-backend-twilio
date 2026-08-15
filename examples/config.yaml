@@ -1,0 +1,322 @@
+# =============================================================================
+# dev.mcpg.backend.twilio — end-to-end sample gateway config
+# =============================================================================
+# This single file wires the Twilio plugin's THREE entities:
+#   1. backend       — SMS/Voice tools + a resource surface (REST proxy)
+#   2. http_route    — inbound webhooks (SMS / voice / status / gather) → TwiML
+#   3. watch_strategy — pushes notifications/resources/updated on inbound events
+#
+# Validate it without a live Twilio account:
+#   cargo run -p mcpg --bin mcpg-config -- check --config libs/plugins/backend/twilio/examples/config.yaml
+# (`build_twiml` works fully offline; the REST/webhook paths need real creds + a
+#  public URL Twilio can reach.)
+
+gateway:
+  server:
+    bind_address: "0.0.0.0:8787"
+    mcp_path: "/mcp"
+    health_path: "/health"
+    max_request_body_mb: 4
+
+# -----------------------------------------------------------------------------
+# Load the plugin artifact ONCE. The cdylib carries all three entities; the
+# top-level `class:` is the plugin's primary class (`backend`) — the http_route
+# and watch_strategy entities ride along in the manifest and register
+# automatically.
+#
+# NUANCE — where each entity's config comes from:
+#   • backend entity        → per-binding `backend:` blocks below (one per tool).
+#   • http_route entity      → THIS `config:` block (TwilioWebhookConfig).
+#   • watch_strategy entity  → the per-watch `strategy:` spec (further down); the
+#                              factory itself takes no config.
+# So the webhook's account/auth/public-URL/inbound behaviour lives here:
+plugins:
+  - id: dev.mcpg.backend.twilio
+    class: backend
+    source: { oci: "oci://ghcr.io/mcpg-dev/plugins/backend-twilio:protocol-1" }
+    config:
+      # The Account SID is ALWAYS required — it is both the REST path segment
+      # and the identity Twilio signs webhooks with.
+      account_sid: "${env.TWILIO_ACCOUNT_SID}"
+
+      # NUANCE — webhook signatures are ALWAYS keyed by the Account *Auth Token*,
+      # never an API Key secret. So the webhook entity needs the auth token even
+      # if your REST tools authenticate with an API key. Use a cred:// ref so the
+      # secret is resolved from the gateway credential cache, never inlined.
+      auth_token: "cred://dev.mcpg.backend.twilio/auth_token"
+
+      # NUANCE — signature validation reconstructs the EXACT public URL Twilio
+      # called (scheme+host+path+query). Behind a proxy/load-balancer the gateway
+      # can't infer that reliably, so set it explicitly. The webhook base URL you
+      # register in Twilio is:  {public_base_url}/plugins/dev.mcpg.backend.twilio/hooks/<route>
+      # e.g. Voice URL → https://mcpg.example.com/plugins/dev.mcpg.backend.twilio/hooks/voice
+      #      SMS URL   → .../hooks/sms     Status callback → .../hooks/status
+      public_base_url: "https://mcpg.example.com"
+
+      # validate_signature defaults to TRUE (fail-closed: bad/missing signature →
+      # 403, no TwiML, no state change). Set false ONLY for local curl testing.
+      validate_signature: true
+      max_body_bytes: 65536
+
+      # --- Inbound SMS behaviour (control level 1: static auto-reply) ---
+      inbound_sms:
+        # A fixed TwiML auto-reply rendered for every inbound SMS. Omit for a
+        # silent 200 (`<Response/>`). For an LLM-authored reply instead, set
+        # `handler_tool` to a tool name the webhook invoke_tool's per message.
+        auto_reply: "Thanks — an agent will follow up shortly."
+        # handler_tool: "twilio.sms_brain"   # optional: agent decides the reply
+
+      # --- Inbound voice behaviour (control levels 1 & 3) ---
+      inbound_voice:
+        # Level 3 (interactive IVR): on each inbound call, the webhook invoke_tool's
+        # this tool with the call params + any captured speech/DTMF, and renders the
+        # returned twiml_verbs. Bounded by handler_timeout_ms; on slow/error it
+        # falls back to default_twiml_verbs. Leave unset to use the static flow.
+        handler_tool: "twilio.voice_brain"
+        # Level 1 (static templated fallback): used when no handler_tool / on
+        # handler timeout. ${From}/${To}/${CallSid} substitute from inbound params.
+        default_twiml_verbs:
+          - { say: { text: "Please hold while we connect you.", voice: "Polly.Joanna" } }
+          - { pause: { length: 1 } }
+          - { say: { text: "All agents are busy. Goodbye." } }
+
+      # handler_tool calls are bounded well under Twilio's ~15s webhook timeout.
+      handler_timeout_ms: 8000
+
+      # OPTIONAL cross-replica push (the native in-process path is the
+      # watch_strategy entity below; use this only for multi-gateway HA where the
+      # webhook may land on a different replica than the subscriber). Must be on
+      # the public_base_url origin.
+      # notify_webhook_url: "https://mcpg.example.com/webhooks/resource-updated/CHANGE_ME"
+
+# Child-tool gating: if you let the voice handler_tool be invoked, enforce the
+# per-tool gate stack on that child path too.
+governance:
+  child_invoke:
+    enforce_gates: true
+
+mcp:
+  capabilities:
+    # -------------------------------------------------------------------------
+    # TOOLS — one binding per Twilio `operation`. All share `kind: twilio`; the
+    # `operation` discriminator selects the REST call. Auth lives on each binding
+    # (or factor it into a shared anchor via your own templating).
+    # -------------------------------------------------------------------------
+    tools:
+      - name: twilio.send_sms
+        title: "Send SMS"
+        description: "Send an SMS (or MMS via media_url) from the configured number."
+        # send_sms is NOT read-only and NOT idempotent — Twilio has no idempotency
+        # key, so a retried call double-sends. Mark it so clients prompt/guard.
+        annotations: { read_only: false, idempotent: false }
+        input_schema:
+          type: object
+          required: [to, body]
+          properties:
+            to:   { type: string, description: "E.164 destination, e.g. +14155551212" }
+            body: { type: string }
+            media_url: { type: array, items: { type: string }, description: "MMS media (https only)" }
+          additionalProperties: false
+        backend:
+          kind: twilio
+          operation: send_sms
+          account_sid: "${env.TWILIO_ACCOUNT_SID}"
+          # REST auth — prefer a scoped, revocable API Key over the root Auth Token.
+          api_key_sid: "${env.TWILIO_API_KEY_SID}"
+          api_key_secret: "cred://dev.mcpg.backend.twilio/api_key_secret"
+          # Sender: either a verified `from` number or a Messaging Service SID.
+          from: "+14155550100"
+          # messaging_service_sid: "MGxxxxxxxx"
+
+      - name: twilio.list_messages
+        title: "List messages"
+        description: "List recent SMS/MMS (filter by direction/to/from). Proxies Twilio — no local store."
+        annotations: { read_only: true, idempotent: true }
+        input_schema:
+          type: object
+          properties:
+            direction: { type: string, enum: [inbound, outbound-api, outbound-reply], description: "filter" }
+            to: { type: string }
+            from: { type: string }
+            page_size: { type: integer, default: 50 }
+          additionalProperties: false
+        backend:
+          kind: twilio
+          operation: list_messages
+          account_sid: "${env.TWILIO_ACCOUNT_SID}"
+          api_key_sid: "${env.TWILIO_API_KEY_SID}"
+          api_key_secret: "cred://dev.mcpg.backend.twilio/api_key_secret"
+          page_size: 50
+
+      - name: twilio.make_call
+        title: "Make a call"
+        description: "Place an outbound call. Provide twiml_verbs to control it (or a url)."
+        annotations: { read_only: false, idempotent: false }
+        input_schema:
+          type: object
+          required: [to]
+          properties:
+            to: { type: string }
+            # twiml_verbs are rendered to TwiML by the plugin (no public URL needed).
+            twiml_verbs: { type: array, items: { type: object } }
+          additionalProperties: false
+        backend:
+          kind: twilio
+          operation: make_call
+          account_sid: "${env.TWILIO_ACCOUNT_SID}"
+          api_key_sid: "${env.TWILIO_API_KEY_SID}"
+          api_key_secret: "cred://dev.mcpg.backend.twilio/api_key_secret"
+          from: "+14155550100"
+
+      # Phone-number validation (Lookups v2 — talks to lookups.twilio.com, a
+      # distinct Twilio host, with the same Basic auth). `fields` pulls optional
+      # carrier/line-type + caller-name data packages.
+      - name: twilio.lookup
+        title: "Look up a phone number"
+        description: "Validate a phone number and optionally fetch carrier/line-type + caller name."
+        annotations: { read_only: true, idempotent: true }
+        input_schema:
+          type: object
+          required: [phone]
+          properties:
+            phone: { type: string, description: "E.164 number, e.g. +14155551212" }
+            fields:
+              type: array
+              items: { type: string, enum: [line_type_intelligence, caller_name] }
+          additionalProperties: false
+        backend:
+          kind: twilio
+          operation: lookup
+          account_sid: "${env.TWILIO_ACCOUNT_SID}"
+          api_key_sid: "${env.TWILIO_API_KEY_SID}"
+          api_key_secret: "cred://dev.mcpg.backend.twilio/api_key_secret"
+
+      # OTP step 1 — start a Verify v2 verification (talks to verify.twilio.com).
+      # `verify_service_sid` is the Verify Service (VA…) — a public identifier,
+      # not a secret.
+      - name: twilio.verify_start
+        title: "Start OTP verification"
+        description: "Send a one-time passcode to a number/email over sms, call, or email."
+        annotations: { read_only: false, idempotent: false }
+        input_schema:
+          type: object
+          required: [to]
+          properties:
+            to: { type: string, description: "E.164 number (sms/call) or email address (email)" }
+            channel: { type: string, enum: [sms, call, email], default: sms }
+          additionalProperties: false
+        backend:
+          kind: twilio
+          operation: verify_start
+          account_sid: "${env.TWILIO_ACCOUNT_SID}"
+          api_key_sid: "${env.TWILIO_API_KEY_SID}"
+          api_key_secret: "cred://dev.mcpg.backend.twilio/api_key_secret"
+          verify_service_sid: "${env.TWILIO_VERIFY_SERVICE_SID}"
+
+      # OTP step 2 — check the code the user entered.
+      - name: twilio.verify_check
+        title: "Check OTP code"
+        description: "Validate a one-time passcode; returns status approved|pending."
+        annotations: { read_only: false, idempotent: false }
+        input_schema:
+          type: object
+          required: [to, code]
+          properties:
+            to:   { type: string }
+            code: { type: string }
+          additionalProperties: false
+        backend:
+          kind: twilio
+          operation: verify_check
+          account_sid: "${env.TWILIO_ACCOUNT_SID}"
+          api_key_sid: "${env.TWILIO_API_KEY_SID}"
+          api_key_secret: "cred://dev.mcpg.backend.twilio/api_key_secret"
+          verify_service_sid: "${env.TWILIO_VERIFY_SERVICE_SID}"
+
+      # A LOCAL tool — renders TwiML from structured verbs. No REST call, no creds
+      # needed, so it validates + runs fully offline. Great for letting the agent
+      # author a call flow it then passes to make_call / stage_call_response.
+      - name: twilio.build_twiml
+        title: "Build TwiML"
+        description: "Render an ordered list of TwiML verbs to an XML string."
+        annotations: { read_only: true, idempotent: true }
+        input_schema:
+          type: object
+          required: [verbs]
+          properties:
+            verbs: { type: array, items: { type: object } }
+          additionalProperties: false
+        backend:
+          kind: twilio
+          operation: build_twiml
+          account_sid: "${env.TWILIO_ACCOUNT_SID}"
+
+      # Pre-stage a TwiML reply the inbound-voice webhook will serve for a specific
+      # call (control level 2): the agent scripts a call ahead of (or during) it.
+      - name: twilio.stage_call_response
+        title: "Stage call response"
+        description: "Stage TwiML the inbound-voice webhook serves for a CallSid (or expected To)."
+        annotations: { read_only: false, idempotent: true }
+        input_schema:
+          type: object
+          required: [verbs]
+          properties:
+            call_sid: { type: string }
+            to: { type: string }
+            verbs: { type: array, items: { type: object } }
+          additionalProperties: false
+        backend:
+          kind: twilio
+          operation: stage_call_response
+          account_sid: "${env.TWILIO_ACCOUNT_SID}"
+
+    # -------------------------------------------------------------------------
+    # RESOURCES — the same backend as a `surface: resource` binding. `list_messages`
+    # rows become a resources/list page; `resources/read` of the `uri:` returns the
+    # JSON body. A subscriber to this URI is what the watch_strategy notifies.
+    # -------------------------------------------------------------------------
+    resources:
+      - name: twilio.inbox
+        title: "Twilio inbox (recent messages)"
+        description: "Recent inbound/outbound messages, read as a JSON resource."
+        uri: "twilio://messages"
+        mime_type: "application/json"
+        annotations: { read_only: true }
+        # NUANCE — the watch below fires resources/updated for THIS uri; the
+        # notification carries only the uri, so the client then resources/read's
+        # here to pull the fresh messages (the read proxies Twilio).
+        watch:
+          strategy:
+            # The generic plugin-watch escape hatch: `type: plugin` + the target
+            # watch plugin's kind(). `kinds` flattens into the plugin spec and
+            # filters which inbound events fire this watch.
+            type: plugin
+            kind: twilio_inbound
+            kinds: [sms]
+        backend:
+          kind: twilio
+          operation: list_messages
+          surface: resource
+          uri: "twilio://messages"
+          account_sid: "${env.TWILIO_ACCOUNT_SID}"
+          api_key_sid: "${env.TWILIO_API_KEY_SID}"
+          api_key_secret: "cred://dev.mcpg.backend.twilio/api_key_secret"
+          page_size: 50
+
+    # -------------------------------------------------------------------------
+    # RESOURCE TEMPLATES — read a single message/call/recording by SID. SID
+    # autocomplete flows through the backend's complete_template_variable.
+    # -------------------------------------------------------------------------
+    resource_templates:
+      - name: twilio.message
+        title: "Message by SID"
+        description: "Read a single SMS/MMS by its Twilio Message SID."
+        uri_template: "twilio://message/{sid}"
+        mime_type: "application/json"
+        backend:
+          kind: twilio
+          operation: get_message
+          surface: resource
+          account_sid: "${env.TWILIO_ACCOUNT_SID}"
+          api_key_sid: "${env.TWILIO_API_KEY_SID}"
+          api_key_secret: "cred://dev.mcpg.backend.twilio/api_key_secret"
