@@ -25,4 +25,9 @@ description: |
 class: backend
 runtime: native-cdylib-v1
 protocol_version: "1.0"
-required_capabilities: [network_outbound]
+required_capabilities:
+  # Twilio REST calls.
+  - network_outbound
+  # The `http_route` entity mounts /plugins/dev.mcpg.backend.twilio/hooks/* to
+  # receive inbound SMS / voice / gather / status webhooks.
+  - http_route_serve
