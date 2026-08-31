@@ -89,6 +89,13 @@ pub enum RestAuth {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename = "twilio", deny_unknown_fields)]
 pub struct TwilioConfig {
+    /// Injected unconditionally by the host's dynamic-registration path
+    /// (`gateway.server.allow_private_backends`). Accepted so the strict
+    /// spec does not refuse the host contract, and deliberately unused:
+    /// the plugin dials only the fixed Twilio API host, so the SSRF
+    /// egress toggle does not gate it.
+    #[serde(default)]
+    pub allow_private_backends: bool,
     /// Twilio Account SID (`AC…`). Embedded in the REST URL.
     pub account_sid: String,
 
@@ -408,6 +415,15 @@ mod tests {
         let cfg = TwilioConfig::parse(&send_spec()).unwrap();
         assert_eq!(cfg.operation, Operation::SendSms);
         assert!(matches!(cfg.rest_auth(), Some(RestAuth::AuthToken { .. })));
+    }
+
+    #[test]
+    fn accepts_the_host_injected_ssrf_toggle() {
+        // The host stamps `allow_private_backends` into every dynamic
+        // backend spec; the strict parser must not refuse it.
+        let mut spec = send_spec();
+        spec["allow_private_backends"] = json!(false);
+        assert!(TwilioConfig::parse(&spec).is_ok());
     }
 
     #[test]
