@@ -1,6 +1,6 @@
 [package]
 name = "mcpg-plugin-backend-twilio"
-version = "0.1.0-alpha.33"
+version = "0.1.0-alpha.39"
 license = "Apache-2.0"
 edition = "2024"
 description = """
@@ -33,24 +33,24 @@ static-firstparty = []
 integration-tests = []
 
 [dependencies]
-mcpg-plugin-protocol = { git = "https://github.com/mcpg-dev/mcpg-plugin-protocol", tag = "v0.1.0-beta.29", version = "=0.1.0-beta.29" }
-mcpg-plugin-sdk      = { git = "https://github.com/mcpg-dev/mcpg-plugin-sdk", tag = "v0.1.0-beta.30", version = "=0.1.0-beta.30", features = ["static-firstparty"] }
-mcpg-plugin-host     = { git = "https://github.com/mcpg-dev/mcpg-plugin-host", tag = "v0.1.0-beta.31", version = "=0.1.0-beta.31" }
+mcpg-plugin-protocol = { git = "https://github.com/mcpg-dev/mcpg-plugin-protocol", tag = "v0.1.0-beta.35", version = "=0.1.0-beta.35" }
+mcpg-plugin-sdk      = { git = "https://github.com/mcpg-dev/mcpg-plugin-sdk", tag = "v0.1.0-beta.36", version = "=0.1.0-beta.36", features = ["static-firstparty"] }
+mcpg-plugin-host     = { git = "https://github.com/mcpg-dev/mcpg-plugin-host", tag = "v0.1.0-beta.37", version = "=0.1.0-beta.37" }
 async-trait    = "0.1"
-base64         = "0.22"
+base64         = "0.23"
 bytes          = "1"
 # HMAC-SHA1 webhook signature (Twilio's scheme) + SHA-256 for the JSON-body
 # `bodySHA256` variant. Constant-time compare via `subtle`.
-hmac           = "0.12"
-sha1           = "0.10"
-sha2           = "0.10"
+hmac           = "0.13"
+sha1           = "0.11"
+sha2           = "0.11"
 subtle         = "2.6"
 metrics        = "0.24"
-# Pure-Rust HTTPS to the Twilio REST API. rustls-tls selects the rustls
+# Pure-Rust HTTPS to the Twilio REST API. rustls selects the rustls
 # provider (no native-tls / OpenSSL); `json` for response decoding.
-reqwest        = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest        = { version = "0.13", default-features = false, features = ["rustls", "json", "form"] }
 # TwiML rendering with correct XML escaping of all text/attr values.
-quick-xml      = "0.37"
+quick-xml      = "0.42"
 serde          = { version = "1", features = ["derive"] }
 serde_json     = "1"
 serde_urlencoded = "0.7"
