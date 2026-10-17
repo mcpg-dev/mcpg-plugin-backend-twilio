@@ -52,6 +52,15 @@ pub struct InboundEvent {
     pub received_at: Instant,
 }
 
+/// The MCP Events type of an inbound SMS.
+pub const SMS_RECEIVED_EVENT_TYPE: &str = "twilio.sms.received";
+/// The MCP Events type of an incoming call.
+pub const CALL_INCOMING_EVENT_TYPE: &str = "twilio.call.incoming";
+/// The MCP Events type of a message status callback.
+pub const MESSAGE_STATUS_EVENT_TYPE: &str = "twilio.message.status";
+/// The MCP Events type of a call status callback.
+pub const CALL_STATUS_EVENT_TYPE: &str = "twilio.call.status";
+
 /// A lightweight notice the webhook publishes onto the in-process channel when
 /// an inbound event arrives. The watch dispatcher fans it out to registered
 /// watchers; it is deliberately small (cheap to clone across broadcast).
@@ -65,6 +74,12 @@ pub struct InboundNotice {
     pub from: Option<String>,
     /// `To` number if present (diagnostics only).
     pub to: Option<String>,
+    /// The MCP Events type an event source emits this notice as.
+    pub event_type: &'static str,
+    /// The event id: the SID, with the status for a status callback.
+    pub event_id: Option<String>,
+    /// The event payload.
+    pub data: serde_json::Value,
 }
 
 /// The closure the host hands a watcher to emit `resources/updated`. Pre-bound
@@ -269,6 +284,13 @@ impl TwilioState {
             .expect("twilio state poisoned")
             .watches
             .len()
+    }
+
+    /// Number of receivers on the notice channel: one once the watch
+    /// dispatcher listens.
+    #[cfg(test)]
+    pub(crate) fn notice_receivers(&self) -> usize {
+        self.notice_tx.receiver_count()
     }
 
     /// Snapshot the `(resource_uri, emit)` pairs whose `kinds` filter matches

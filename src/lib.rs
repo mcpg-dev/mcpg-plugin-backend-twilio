@@ -48,10 +48,3 @@ pub use config::{Operation, TwilioConfig, TwilioWebhookConfig};
 pub use state::TwilioState;
 pub use watch::TwilioWatchCdylib;
 pub use webhook::TwilioWebhook;
-
-/// Compute the expected `X-Twilio-Signature` for a form webhook. Exposed only
-/// for the integration suite (which signs the requests it simulates).
-#[cfg(feature = "integration-tests")]
-pub fn signature_for_test(auth_token: &str, url: &str, params: &[(String, String)]) -> String {
-    signature::expected_signature_form(auth_token, url, params)
-}

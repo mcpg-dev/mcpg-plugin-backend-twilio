@@ -31,3 +31,46 @@ required_capabilities:
   # The `http_route` entity mounts /plugins/dev.mcpg.backend.twilio/hooks/* to
   # receive inbound SMS / voice / gather / status webhooks.
   - http_route_serve
+# MCP Events: how the twilio_inbound watch runs as a source, and what it emits.
+# A webhook lands on whichever replica Twilio reaches, so every replica watches.
+watch_strategies:
+  - kind: twilio_inbound
+    placement: every_replica
+    resume: false
+    event_types:
+      - name: twilio.sms.received
+        description: An inbound SMS. The eventId is the MessageSid.
+        payload_schema:
+          type: object
+          properties:
+            messageSid: { type: [string, "null"] }
+            from: { type: [string, "null"] }
+            to: { type: [string, "null"] }
+            body: { type: [string, "null"] }
+            numMedia: { type: [integer, "null"] }
+      - name: twilio.call.incoming
+        description: An incoming call. The eventId is the CallSid.
+        payload_schema:
+          type: object
+          properties:
+            callSid: { type: [string, "null"] }
+            from: { type: [string, "null"] }
+            to: { type: [string, "null"] }
+            callStatus: { type: [string, "null"] }
+            direction: { type: [string, "null"] }
+      - name: twilio.message.status
+        description: A message status callback. The eventId is the MessageSid and the status.
+        payload_schema:
+          type: object
+          properties:
+            messageSid: { type: [string, "null"] }
+            status: { type: [string, "null"] }
+            errorCode: { type: [integer, "null"] }
+      - name: twilio.call.status
+        description: A call status callback. The eventId is the CallSid and the status.
+        payload_schema:
+          type: object
+          properties:
+            callSid: { type: [string, "null"] }
+            status: { type: [string, "null"] }
+            errorCode: { type: [integer, "null"] }

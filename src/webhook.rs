@@ -33,7 +33,10 @@ use tracing::warn;
 
 use crate::config::{InboundSms, InboundVoice, TwilioWebhookConfig};
 use crate::signature;
-use crate::state::{InboundEvent, InboundNotice, ScriptKey, TwilioState};
+use crate::state::{
+    CALL_INCOMING_EVENT_TYPE, CALL_STATUS_EVENT_TYPE, InboundEvent, InboundNotice,
+    MESSAGE_STATUS_EVENT_TYPE, SMS_RECEIVED_EVENT_TYPE, ScriptKey, TwilioState,
+};
 use crate::twiml::{self, TwimlVerb};
 
 pub const PLUGIN_ID: &str = "dev.mcpg.backend.twilio";
@@ -209,6 +212,15 @@ impl TwilioWebhook {
             sid: sid.map(str::to_owned),
             from: from.map(str::to_owned),
             to: to.map(str::to_owned),
+            event_type: SMS_RECEIVED_EVENT_TYPE,
+            event_id: sid.map(str::to_owned),
+            data: json!({
+                "messageSid": sid,
+                "from": from,
+                "to": to,
+                "body": param(params, "Body"),
+                "numMedia": param(params, "NumMedia").and_then(|n| n.parse::<u32>().ok()),
+            }),
         });
         self.maybe_push("sms");
         metrics::counter!("mcpg_twilio_webhook_total", "outcome" => "sms").increment(1);
@@ -243,6 +255,15 @@ impl TwilioWebhook {
             sid: call_sid.map(str::to_owned),
             from: from.map(str::to_owned),
             to: to.map(str::to_owned),
+            event_type: CALL_INCOMING_EVENT_TYPE,
+            event_id: call_sid.map(str::to_owned),
+            data: json!({
+                "callSid": call_sid,
+                "from": from,
+                "to": to,
+                "callStatus": param(params, "CallStatus"),
+                "direction": param(params, "Direction"),
+            }),
         });
         self.maybe_push("voice");
         metrics::counter!("mcpg_twilio_webhook_total", "outcome" => "voice").increment(1);
@@ -316,11 +337,28 @@ impl TwilioWebhook {
             to: None,
             received_at: Instant::now(),
         });
+        let call = param(params, "CallSid").is_some();
+        // The id field is named as in the received and incoming events.
+        let (event_type, sid_field) = if call {
+            (CALL_STATUS_EVENT_TYPE, "callSid")
+        } else {
+            (MESSAGE_STATUS_EVENT_TYPE, "messageSid")
+        };
+        let mut data = serde_json::Map::new();
+        data.insert(sid_field.to_owned(), json!(sid));
+        data.insert("status".to_owned(), json!(status));
+        data.insert(
+            "errorCode".to_owned(),
+            json!(param(params, "ErrorCode").and_then(|code| code.parse::<u32>().ok())),
+        );
         self.state.notify_inbound(InboundNotice {
             kind: "status".into(),
             sid: sid.map(str::to_owned),
             from: None,
             to: None,
+            event_type,
+            event_id: sid.map(|sid| format!("{sid}:{}", status.unwrap_or("unknown"))),
+            data: serde_json::Value::Object(data),
         });
         metrics::counter!("mcpg_twilio_webhook_total", "outcome" => "status").increment(1);
         // Status callbacks expect a 204 (no TwiML).
@@ -702,6 +740,45 @@ mod tests {
         let resp = wh.handle(req("/status", vec![], &body, Some(&sig)));
         assert_eq!(resp.status, 204);
         assert_eq!(wh.state.last_status("CA7").as_deref(), Some("completed"));
+    }
+
+    /// A status event names its id as the received and incoming events do,
+    /// and its error code is a number.
+    #[test]
+    fn status_events_name_the_sid_like_the_other_events() {
+        let c = base_cfg();
+        let wh = webhook(base_cfg());
+        let mut notices = wh.state.subscribe_notices();
+        for params in [
+            vec![
+                ("CallSid".to_string(), "CA7".to_string()),
+                ("CallStatus".to_string(), "failed".to_string()),
+                ("ErrorCode".to_string(), "31005".to_string()),
+            ],
+            vec![
+                ("MessageSid".to_string(), "SM9".to_string()),
+                ("MessageStatus".to_string(), "delivered".to_string()),
+            ],
+        ] {
+            let sig = sign(&c, "/status", &params);
+            let body = serde_urlencoded::to_string(&params).unwrap();
+            assert_eq!(
+                wh.handle(req("/status", vec![], &body, Some(&sig))).status,
+                204
+            );
+        }
+        let call = notices.try_recv().expect("a call status notice");
+        assert_eq!(call.event_type, CALL_STATUS_EVENT_TYPE);
+        assert_eq!(
+            call.data,
+            json!({ "callSid": "CA7", "status": "failed", "errorCode": 31005 })
+        );
+        let message = notices.try_recv().expect("a message status notice");
+        assert_eq!(message.event_type, MESSAGE_STATUS_EVENT_TYPE);
+        assert_eq!(
+            message.data,
+            json!({ "messageSid": "SM9", "status": "delivered", "errorCode": null })
+        );
     }
 
     #[test]

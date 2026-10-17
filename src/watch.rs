@@ -150,18 +150,33 @@ impl TwilioWatchCdylib {
 
 /// Fan one notice out to every matching registered watcher. Snapshots the
 /// matching emitters under the state lock, then calls them after releasing it
-/// (the host's emit may take time and must not hold the state mutex). The
-/// `WatchEvent` payload is the default — Twilio inbound is not tied to an MCP
-/// session, so `user_id` / `session_id` are both `None`.
+/// (the host's emit may take time and must not hold the state mutex). An MCP
+/// Events source gets the notice's event; a resource watch only the change.
+/// Twilio inbound is not tied to an MCP session, so `user_id` / `session_id`
+/// are both `None`.
 fn dispatch(state: &TwilioState, notice: &InboundNotice) {
     let emitters = state.matching_emitters(&notice.kind);
     if emitters.is_empty() {
         return;
     }
-    let event_json =
-        serde_json::to_string(&WatchEvent::default()).unwrap_or_else(|_| "{}".to_owned());
-    for (_uri, emit) in emitters {
-        emit(&event_json);
+    let bare = serde_json::to_string(&WatchEvent::default()).unwrap_or_else(|_| "{}".to_owned());
+    let event = serde_json::to_string(&notice_event(notice)).unwrap_or_else(|_| bare.clone());
+    for (uri, emit) in emitters {
+        if mcpg_plugin_protocol::is_event_source(&uri) {
+            emit(&event);
+        } else {
+            emit(&bare);
+        }
+    }
+}
+
+/// The MCP Events event of one inbound notice.
+fn notice_event(notice: &InboundNotice) -> WatchEvent {
+    WatchEvent {
+        event_id: notice.event_id.clone(),
+        event_type: Some(notice.event_type.to_owned()),
+        data: Some(notice.data.clone()),
+        ..WatchEvent::default()
     }
 }
 
@@ -243,8 +258,15 @@ mod tests {
             sid: Some("SM1".into()),
             from: Some("+1555".into()),
             to: Some("+1666".into()),
+            event_type: crate::state::SMS_RECEIVED_EVENT_TYPE,
+            event_id: Some("SM1".into()),
+            data: json!({ "messageSid": "SM1", "body": "hi" }),
         }
     }
+
+    /// How long a wait lasts before the test fails. A wait ends as soon as
+    /// its condition holds, so only a failing run waits this long.
+    const WAIT: Duration = Duration::from_secs(10);
 
     /// Poll a condition until true or timeout.
     fn wait_until(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
@@ -258,9 +280,15 @@ mod tests {
         cond()
     }
 
+    /// The entity, once its dispatcher listens: the channel drops a notice
+    /// sent before that.
     fn plugin() -> (Arc<TwilioState>, TwilioWatchCdylib) {
         let state = Arc::new(TwilioState::default());
         let p = TwilioWatchCdylib::new(Arc::clone(&state));
+        assert!(
+            wait_until(|| state.notice_receivers() == 1, WAIT),
+            "the dispatcher subscribes to the notice channel"
+        );
         (state, p)
     }
 
@@ -297,17 +325,41 @@ mod tests {
                 emit_for(&s),
             )
             .unwrap();
-        // Give the dispatcher a moment to subscribe its receiver.
-        std::thread::sleep(Duration::from_millis(50));
 
         state.notify_inbound(notice("sms"));
         assert!(
-            wait_until(|| count(&s) >= 1, Duration::from_secs(2)),
+            wait_until(|| count(&s) >= 1, WAIT),
             "a matching sms notice should drive one emit"
         );
         let body = s.lock().unwrap()[0].clone();
         // Default WatchEvent serializes empty (user_id/session_id both None).
         assert_eq!(body, "{}");
+    }
+
+    #[test]
+    fn an_event_source_gets_the_notice_payload() {
+        let (state, p) = plugin();
+        let s = sink();
+        let _handle = p
+            .watch(
+                "mcpg-event://sms.received",
+                &json!({ "kinds": ["sms"] }),
+                emit_for(&s),
+            )
+            .unwrap();
+
+        state.notify_inbound(notice("sms"));
+        assert!(wait_until(|| count(&s) >= 1, WAIT));
+        let event: WatchEvent = serde_json::from_str(&s.lock().unwrap()[0]).unwrap();
+        assert_eq!(event.event_id.as_deref(), Some("SM1"));
+        assert_eq!(
+            event.event_type.as_deref(),
+            Some(crate::state::SMS_RECEIVED_EVENT_TYPE)
+        );
+        assert_eq!(
+            event.data,
+            Some(json!({ "messageSid": "SM1", "body": "hi" }))
+        );
     }
 
     #[test]
@@ -321,7 +373,6 @@ mod tests {
                 emit_for(&s),
             )
             .unwrap();
-        std::thread::sleep(Duration::from_millis(50));
 
         // A voice notice must NOT fire an sms-only watcher.
         state.notify_inbound(notice("voice"));
@@ -334,7 +385,7 @@ mod tests {
 
         // A matching sms notice does.
         state.notify_inbound(notice("sms"));
-        assert!(wait_until(|| count(&s) >= 1, Duration::from_secs(2)));
+        assert!(wait_until(|| count(&s) >= 1, WAIT));
     }
 
     #[test]
@@ -344,13 +395,12 @@ mod tests {
         let _handle = p
             .watch("twilio://inbound", &json!({}), emit_for(&s))
             .unwrap();
-        std::thread::sleep(Duration::from_millis(50));
 
         state.notify_inbound(notice("sms"));
         state.notify_inbound(notice("voice"));
         state.notify_inbound(notice("status"));
         assert!(
-            wait_until(|| count(&s) >= 3, Duration::from_secs(2)),
+            wait_until(|| count(&s) >= 3, WAIT),
             "an unfiltered watch should fire on all three kinds"
         );
     }
@@ -362,10 +412,12 @@ mod tests {
         let handle = p
             .watch("twilio://messages", &json!({}), emit_for(&s))
             .unwrap();
-        std::thread::sleep(Duration::from_millis(50));
 
         state.notify_inbound(notice("sms"));
-        assert!(wait_until(|| count(&s) >= 1, Duration::from_secs(2)));
+        assert!(
+            wait_until(|| count(&s) >= 1, WAIT),
+            "a notice before cancel drives an emit"
+        );
         let after = count(&s);
 
         p.cancel(handle);
@@ -424,10 +476,9 @@ mod tests {
                 emit_for(&voice_sink),
             )
             .unwrap();
-        std::thread::sleep(Duration::from_millis(50));
 
         state.notify_inbound(notice("sms"));
-        assert!(wait_until(|| count(&sms_sink) >= 1, Duration::from_secs(2)));
+        assert!(wait_until(|| count(&sms_sink) >= 1, WAIT));
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
             count(&voice_sink),
@@ -436,10 +487,7 @@ mod tests {
         );
 
         state.notify_inbound(notice("voice"));
-        assert!(wait_until(
-            || count(&voice_sink) >= 1,
-            Duration::from_secs(2)
-        ));
+        assert!(wait_until(|| count(&voice_sink) >= 1, WAIT));
         assert_eq!(
             count(&sms_sink),
             1,
