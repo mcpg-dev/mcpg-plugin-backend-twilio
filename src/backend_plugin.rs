@@ -307,6 +307,7 @@ mod tests {
                 session_id: None,
                 identity: None,
                 idempotency: None,
+                client: None,
             },
         )
         .await
@@ -328,6 +329,7 @@ mod tests {
                 session_id: None,
                 identity: None,
                 idempotency: None,
+                client: None,
             },
         )
         .await;
@@ -402,6 +404,7 @@ mod tests {
                 session_id: None,
                 identity: None,
                 idempotency: None,
+                client: None,
             },
         )
         .await
