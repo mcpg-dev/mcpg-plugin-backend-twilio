@@ -93,9 +93,10 @@ plugin renders valid TwiML, so the agent never writes XML.
 - **Push** — declare a `watch:` with `strategy: { type: plugin, kind: twilio_inbound }`
   on a collection resource (see `twilio.inbox` in the sample). When a matching
   inbound event lands at the webhook, the `watch_strategy` entity fires
-  `notifications/resources/updated` for that resource URI to every client that
-  `resources/subscribe`d to it; the client then `resources/read`s to fetch the new
-  data (the notification carries only the URI). The optional `kinds: [sms|voice|status]`
+  `notifications/resources/updated` for that resource URI on every
+  `subscriptions/listen` stream that names it in `resourceSubscriptions`; the
+  client then `resources/read`s to fetch the new data (the notification carries
+  only the URI). The optional `kinds: [sms|voice|status]`
   filters which inbound events fire the watch.
   - `notify_webhook_url` is an alternative *cross-replica* push path (POSTs the
     built-in `/webhooks/resource-updated/{token}`) for multi-gateway HA, where the

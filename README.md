@@ -139,10 +139,11 @@ strategy:
 ```
 
 Operator story: declare a resource watch with `strategy.kind: twilio_inbound`
-on a collection URI (e.g. `twilio://messages`); a client `resources/subscribe`s
-to it; an inbound SMS then drives `resources/updated`, and the client re-reads
-the fresh message from Twilio's REST API. The `WatchEvent` payload carries no
-`user_id` / `session_id` (Twilio inbound is not tied to an MCP session).
+on a collection URI (e.g. `twilio://messages`); a client names it in the
+`resourceSubscriptions` of a `subscriptions/listen` request; an inbound SMS
+then drives `notifications/resources/updated` on that stream, and the client
+re-reads the fresh message from Twilio's REST API. The `WatchEvent` payload
+carries no `user_id` / `session_id` (Twilio inbound is not tied to a caller).
 
 `notify_webhook_url` remains the **cross-replica** push alternative: the native
 watch is in-process (single-replica), matching the state caveat below.
